@@ -15,8 +15,6 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "driver/rmt.h"
-#include "driver/periph_ctrl.h"
-#include "soc/rmt_reg.h"
 
 static const char* NEC_TAG = "NEC";
 
@@ -40,7 +38,7 @@ static const char* NEC_TAG = "NEC";
 #endif
 
 #define RMT_TX_CHANNEL    1     /*!< RMT channel for transmitter */
-#define RMT_TX_GPIO_NUM  16     /*!< GPIO number for transmitter signal */
+#define RMT_TX_GPIO_NUM  18     /*!< GPIO number for transmitter signal */
 #define RMT_RX_CHANNEL    0     /*!< RMT channel for receiver */
 #define RMT_RX_GPIO_NUM  19     /*!< GPIO number for receiver */
 #define RMT_CLK_DIV      100    /*!< RMT counter clock divider */
@@ -237,7 +235,7 @@ static int nec_build_items(int channel, rmt_item32_t* item, int item_num, uint16
 /*
  * @brief RMT transmitter initialization
  */
-static void nec_tx_init()
+static void nec_tx_init(void)
 {
     rmt_config_t rmt_tx;
     rmt_tx.channel = RMT_TX_CHANNEL;
@@ -259,7 +257,7 @@ static void nec_tx_init()
 /*
  * @brief RMT receiver initialization
  */
-static void nec_rx_init()
+static void nec_rx_init(void)
 {
     rmt_config_t rmt_rx;
     rmt_rx.channel = RMT_RX_CHANNEL;
@@ -278,13 +276,13 @@ static void nec_rx_init()
  * @brief RMT receiver demo, this task will print each received NEC data.
  *
  */
-static void rmt_example_nec_rx_task()
+static void rmt_example_nec_rx_task(void *arg)
 {
     int channel = RMT_RX_CHANNEL;
     nec_rx_init();
     RingbufHandle_t rb = NULL;
     //get RMT RX ringbuffer
-    rmt_get_ringbuf_handler(channel, &rb);
+    rmt_get_ringbuf_handle(channel, &rb);
     rmt_rx_start(channel, 1);
     while(rb) {
         size_t rx_size = 0;
@@ -319,7 +317,7 @@ static void rmt_example_nec_rx_task()
  * @brief RMT transmitter demo, this task will periodically send NEC data. (100 * 32 bits each time.)
  *
  */
-static void rmt_example_nec_tx_task()
+static void rmt_example_nec_tx_task(void *arg)
 {
     vTaskDelay(10);
     nec_tx_init();
@@ -338,7 +336,7 @@ static void rmt_example_nec_tx_task()
         int i, offset = 0;
         while(1) {
             //To build a series of waveforms.
-            i = nec_build_items(channel, item + offset, item_num - offset, ((~addr) << 8) | addr, cmd);
+            i = nec_build_items(channel, item + offset, item_num - offset, ((~addr) << 8) | addr, ((~cmd) << 8) |  cmd);
             if(i < 0) {
                 break;
             }
@@ -349,7 +347,7 @@ static void rmt_example_nec_tx_task()
         //To send data according to the waveform items.
         rmt_write_items(channel, item, item_num, true);
         //Wait until sending is done.
-        rmt_wait_tx_done(channel);
+        rmt_wait_tx_done(channel, portMAX_DELAY);
         //before we free the data, make sure sending is already done.
         free(item);
         vTaskDelay(2000 / portTICK_PERIOD_MS);
@@ -357,7 +355,7 @@ static void rmt_example_nec_tx_task()
     vTaskDelete(NULL);
 }
 
-void app_main()
+void app_main(void)
 {
     xTaskCreate(rmt_example_nec_rx_task, "rmt_nec_rx_task", 2048, NULL, 10, NULL);
     xTaskCreate(rmt_example_nec_tx_task, "rmt_nec_tx_task", 2048, NULL, 10, NULL);

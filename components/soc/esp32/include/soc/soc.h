@@ -1,4 +1,4 @@
-// Copyright 2010-2017 Espressif Systems (Shanghai) PTE LTD
+// Copyright 2010-2019 Espressif Systems (Shanghai) PTE LTD
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,58 +20,35 @@
 #include "esp_assert.h"
 #endif
 
-//Register Bits{{
-#define BIT31   0x80000000
-#define BIT30   0x40000000
-#define BIT29   0x20000000
-#define BIT28   0x10000000
-#define BIT27   0x08000000
-#define BIT26   0x04000000
-#define BIT25   0x02000000
-#define BIT24   0x01000000
-#define BIT23   0x00800000
-#define BIT22   0x00400000
-#define BIT21   0x00200000
-#define BIT20   0x00100000
-#define BIT19   0x00080000
-#define BIT18   0x00040000
-#define BIT17   0x00020000
-#define BIT16   0x00010000
-#define BIT15   0x00008000
-#define BIT14   0x00004000
-#define BIT13   0x00002000
-#define BIT12   0x00001000
-#define BIT11   0x00000800
-#define BIT10   0x00000400
-#define BIT9     0x00000200
-#define BIT8     0x00000100
-#define BIT7     0x00000080
-#define BIT6     0x00000040
-#define BIT5     0x00000020
-#define BIT4     0x00000010
-#define BIT3     0x00000008
-#define BIT2     0x00000004
-#define BIT1     0x00000002
-#define BIT0     0x00000001
-//}}
+#include <esp_bit_defs.h>
 
 #define PRO_CPU_NUM (0)
 #define APP_CPU_NUM (1)
 
 /* Overall memory map */
-#define SOC_IROM_LOW    0x400D0000
-#define SOC_IROM_HIGH   0x40400000
-#define SOC_DROM_LOW    0x3F400000
-#define SOC_DROM_HIGH   0x3F800000
-#define SOC_RTC_IRAM_LOW  0x400C0000
-#define SOC_RTC_IRAM_HIGH 0x400C2000
-#define SOC_RTC_DATA_LOW  0x50000000
-#define SOC_RTC_DATA_HIGH 0x50002000
+#define SOC_IROM_LOW            0x400D0000
+#define SOC_IROM_HIGH           0x40400000
+#define SOC_DROM_LOW            0x3F400000
+#define SOC_DROM_HIGH           0x3F800000
+#define SOC_DRAM_LOW            0x3FFAE000
+#define SOC_DRAM_HIGH           0x40000000
+#define SOC_RTC_IRAM_LOW        0x400C0000
+#define SOC_RTC_IRAM_HIGH       0x400C2000
+#define SOC_RTC_DATA_LOW        0x50000000
+#define SOC_RTC_DATA_HIGH       0x50002000
+#define SOC_EXTRAM_DATA_LOW     0x3F800000
+#define SOC_EXTRAM_DATA_HIGH    0x3FC00000
+
+#define SOC_MAX_CONTIGUOUS_RAM_SIZE 0x400000 ///< Largest span of contiguous memory (DRAM or IRAM) in the address space
+
 
 #define DR_REG_DPORT_BASE                       0x3ff00000
-#define DR_REG_DPORT_END                        0x3ff00FFC
+#define DR_REG_AES_BASE                         0x3ff01000
 #define DR_REG_RSA_BASE                         0x3ff02000
 #define DR_REG_SHA_BASE                         0x3ff03000
+#define DR_REG_FLASH_MMU_TABLE_PRO              0x3ff10000
+#define DR_REG_FLASH_MMU_TABLE_APP              0x3ff12000
+#define DR_REG_DPORT_END                        0x3ff13FFC
 #define DR_REG_UART_BASE                        0x3ff40000
 #define DR_REG_SPI1_BASE                        0x3ff42000
 #define DR_REG_SPI0_BASE                        0x3ff43000
@@ -83,11 +60,8 @@
 #define DR_REG_RTCCNTL_BASE                     0x3ff48000
 #define DR_REG_RTCIO_BASE                       0x3ff48400
 #define DR_REG_SENS_BASE                        0x3ff48800
+#define DR_REG_RTC_I2C_BASE                     0x3ff48C00
 #define DR_REG_IO_MUX_BASE                      0x3ff49000
-#define DR_REG_RTCMEM0_BASE                     0x3ff61000
-#define DR_REG_RTCMEM1_BASE                     0x3ff62000
-#define DR_REG_RTCMEM2_BASE                     0x3ff63000
-#define DR_REG_SYSCON_BASE                      0x3ff66000
 #define DR_REG_HINF_BASE                        0x3ff4B000
 #define DR_REG_UHCI1_BASE                       0x3ff4C000
 #define DR_REG_I2S_BASE                         0x3ff4F000
@@ -107,28 +81,28 @@
 #define DR_REG_PWM_BASE                         0x3ff5E000
 #define DR_REG_TIMERGROUP0_BASE                 0x3ff5F000
 #define DR_REG_TIMERGROUP1_BASE                 0x3ff60000
+#define DR_REG_RTCMEM0_BASE                     0x3ff61000
+#define DR_REG_RTCMEM1_BASE                     0x3ff62000
+#define DR_REG_RTCMEM2_BASE                     0x3ff63000
 #define DR_REG_SPI2_BASE                        0x3ff64000
 #define DR_REG_SPI3_BASE                        0x3ff65000
-#define DR_REG_APB_CTRL_BASE                    0x3ff66000
+#define DR_REG_SYSCON_BASE                      0x3ff66000
+#define DR_REG_APB_CTRL_BASE                    0x3ff66000    /* Old name for SYSCON, to be removed */
 #define DR_REG_I2C1_EXT_BASE                    0x3ff67000
 #define DR_REG_SDMMC_BASE                       0x3ff68000
 #define DR_REG_EMAC_BASE                        0x3ff69000
+#define DR_REG_CAN_BASE                         0x3ff6B000
 #define DR_REG_PWM1_BASE                        0x3ff6C000
 #define DR_REG_I2S1_BASE                        0x3ff6D000
 #define DR_REG_UART2_BASE                       0x3ff6E000
 #define DR_REG_PWM2_BASE                        0x3ff6F000
 #define DR_REG_PWM3_BASE                        0x3ff70000
-#define PERIPHS_SPI_ENCRYPT_BASEADDR		DR_REG_SPI_ENCRYPT_BASE
+#define PERIPHS_SPI_ENCRYPT_BASEADDR            DR_REG_SPI_ENCRYPT_BASE
 
 //Registers Operation {{
 #define ETS_UNCACHED_ADDR(addr) (addr)
-#define ETS_CACHED_ADDR(addr) (addr) 
+#define ETS_CACHED_ADDR(addr) (addr)
 
-#ifndef __ASSEMBLER__
-#define BIT(nr)                 (1UL << (nr))
-#else
-#define BIT(nr)                 (1 << (nr))
-#endif
 
 #ifndef __ASSEMBLER__
 
@@ -262,22 +236,32 @@
 #define  CPU_CLK_FREQ_ROM                            APB_CLK_FREQ_ROM
 #define  CPU_CLK_FREQ                                APB_CLK_FREQ
 #define  APB_CLK_FREQ                                ( 80*1000000 )       //unit: Hz
+#define  REF_CLK_FREQ                                ( 1000000 )
 #define  UART_CLK_FREQ                               APB_CLK_FREQ
 #define  WDT_CLK_FREQ                                APB_CLK_FREQ
 #define  TIMER_CLK_FREQ                              (80000000>>4) //80MHz divided by 16
 #define  SPI_CLK_DIV                                 4
 #define  TICKS_PER_US_ROM                            26              // CPU is 80MHz
+#define  GPIO_MATRIX_DELAY_NS                        25
 //}}
 
 /* Overall memory map */
-#define SOC_IROM_LOW    0x400D0000
-#define SOC_IROM_HIGH   0x40400000
-#define SOC_IRAM_LOW    0x40080000
-#define SOC_IRAM_HIGH   0x400A0000
 #define SOC_DROM_LOW    0x3F400000
 #define SOC_DROM_HIGH   0x3F800000
+#define SOC_IROM_LOW    0x400D0000
+#define SOC_IROM_HIGH   0x40400000
+#define SOC_IROM_MASK_LOW   0x40000000
+#define SOC_IROM_MASK_HIGH  0x40070000
+#define SOC_CACHE_PRO_LOW   0x40070000
+#define SOC_CACHE_PRO_HIGH  0x40078000
+#define SOC_CACHE_APP_LOW   0x40078000
+#define SOC_CACHE_APP_HIGH  0x40080000
+#define SOC_IRAM_LOW    0x40080000
+#define SOC_IRAM_HIGH   0x400A0000
 #define SOC_RTC_IRAM_LOW  0x400C0000
 #define SOC_RTC_IRAM_HIGH 0x400C2000
+#define SOC_RTC_DRAM_LOW  0x3FF80000
+#define SOC_RTC_DRAM_HIGH 0x3FF82000
 #define SOC_RTC_DATA_LOW  0x50000000
 #define SOC_RTC_DATA_HIGH 0x50002000
 
@@ -290,6 +274,15 @@
 // Region of memory accessible via DMA. See esp_ptr_dma_capable().
 #define SOC_DMA_LOW  0x3FFAE000
 #define SOC_DMA_HIGH 0x40000000
+
+// Region of memory that is byte-accessible. See esp_ptr_byte_accessible().
+#define SOC_BYTE_ACCESSIBLE_LOW     0x3FF90000
+#define SOC_BYTE_ACCESSIBLE_HIGH    0x40000000
+
+//Region of memory that is internal, as in on the same silicon die as the ESP32 CPUs
+//(excluding RTC data region, that's checked separately.) See esp_ptr_internal().
+#define SOC_MEM_INTERNAL_LOW        0x3FF90000
+#define SOC_MEM_INTERNAL_HIGH       0x400C2000
 
 //Interrupt hardware source table
 //This table is decided by hardware, don't touch this.
@@ -376,7 +369,7 @@
  *      7                       1               software                BT/BLE VHCI             BT/BLE VHCI
  *      8                       1               extern level            BT/BLE BB(RX/TX)        BT/BLE BB(RX/TX)
  *      9                       1               extern level
- *      10                      1               extern edge             Internal Timer
+ *      10                      1               extern edge
  *      11                      3               profiling
  *      12                      1               extern level
  *      13                      1               extern level
@@ -388,7 +381,7 @@
  *      19                      2               extern level
  *      20                      2               extern level
  *      21                      2               extern level
- *      22                      3               extern edge             FRC1 timer
+ *      22                      3               extern edge
  *      23                      3               extern level
  *      24                      4               extern level            TG1_WDT
  *      25                      4               extern level            CACHEERR

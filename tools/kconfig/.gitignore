@@ -2,6 +2,7 @@
 # Generated files
 #
 config*
+*.d
 *.lex.c
 *.tab.c
 *.tab.h
@@ -10,12 +11,15 @@ zconf.hash.c
 gconf.glade.h
 *.pot
 *.mo
+*.o
 
 #
 # configuration programs
 #
 conf
+conf-idf
 mconf
+mconf-idf
 nconf
 qconf
 gconf
@@ -23,7 +27,9 @@ kxgettext
 
 # configuration programs, Windows
 conf.exe
+conf-idf.exe
 mconf.exe
+mconf-idf.exe
 nconf.exe
 qconf.exe
 gconf.exe

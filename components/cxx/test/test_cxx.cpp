@@ -1,10 +1,13 @@
 #include <vector>
-#include <algorithm>
+#include <numeric>
+#include <stdexcept>
+#include <string>
 #include "unity.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "soc/soc.h"
 
 static const char* TAG = "cxx";
 
@@ -20,7 +23,7 @@ class Base
 {
 public:
     virtual ~Base() {}
-    virtual void foo() = 0; 
+    virtual void foo() = 0;
 };
 
 class Derived : public Base
@@ -92,7 +95,6 @@ public:
         static SlowInit slowinit(taskId);
         ESP_LOGD(TAG, "obj=%d after static init, task=%d\n", obj, taskId);
         xSemaphoreGive(s_slow_init_sem);
-        vTaskDelay(10);
         vTaskDelete(NULL);
     }
 private:
@@ -106,33 +108,40 @@ template<> int SlowInit<2>::mInitBy = -1;
 template<> int SlowInit<2>::mInitCount = 0;
 
 template<int obj>
-static void start_slow_init_task(int id, int affinity)
+static int start_slow_init_task(int id, int affinity)
 {
-    xTaskCreatePinnedToCore(&SlowInit<obj>::task, "slow_init", 2048,
-            reinterpret_cast<void*>(id), 3, NULL, affinity);
+    return xTaskCreatePinnedToCore(&SlowInit<obj>::task, "slow_init", 2048,
+            reinterpret_cast<void*>(id), 3, NULL, affinity) ? 1 : 0;
 }
 
 TEST_CASE("static initialization guards work as expected", "[cxx]")
 {
     s_slow_init_sem = xSemaphoreCreateCounting(10, 0);
     TEST_ASSERT_NOT_NULL(s_slow_init_sem);
+    int task_count = 0;
     // four tasks competing for static initialization of one object
-    start_slow_init_task<1>(0, PRO_CPU_NUM);
-    start_slow_init_task<1>(1, APP_CPU_NUM);
-    start_slow_init_task<1>(2, PRO_CPU_NUM);
-    start_slow_init_task<1>(3, tskNO_AFFINITY);
+    task_count += start_slow_init_task<1>(0, PRO_CPU_NUM);
+#if portNUM_PROCESSORS == 2
+    task_count += start_slow_init_task<1>(1, APP_CPU_NUM);
+#endif
+    task_count += start_slow_init_task<1>(2, PRO_CPU_NUM);
+    task_count += start_slow_init_task<1>(3, tskNO_AFFINITY);
 
     // four tasks competing for static initialization of another object
-    start_slow_init_task<2>(0, PRO_CPU_NUM);
-    start_slow_init_task<2>(1, APP_CPU_NUM);
-    start_slow_init_task<2>(2, PRO_CPU_NUM);
-    start_slow_init_task<2>(3, tskNO_AFFINITY);
+    task_count += start_slow_init_task<2>(0, PRO_CPU_NUM);
+#if portNUM_PROCESSORS == 2
+    task_count += start_slow_init_task<2>(1, APP_CPU_NUM);
+#endif
+    task_count += start_slow_init_task<2>(2, PRO_CPU_NUM);
+    task_count += start_slow_init_task<2>(3, tskNO_AFFINITY);
 
     // All tasks should
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < task_count; ++i) {
         TEST_ASSERT_TRUE(xSemaphoreTake(s_slow_init_sem, 500/portTICK_PERIOD_MS));
     }
     vSemaphoreDelete(s_slow_init_sem);
+
+    vTaskDelay(10); // Allow tasks to clean up, avoids race with leak detector
 }
 
 struct GlobalInitTest
@@ -186,6 +195,102 @@ TEST_CASE("before scheduler has started, static initializers work correctly", "[
     TEST_ASSERT_EQUAL(1, g_static_init_test3.index);
     TEST_ASSERT_EQUAL(2, StaticInitTestBeforeScheduler::order);
 }
+
+#ifdef CONFIG_COMPILER_CXX_EXCEPTIONS
+
+TEST_CASE("c++ exceptions work", "[cxx]")
+{
+    /* Note: When first exception (in system) is thrown this test produces memory leaks report (~500 bytes):
+       - 392 bytes (can vary) as libunwind allocates memory to keep stack frames info to handle exceptions.
+         This info is kept until global destructors are called by __do_global_dtors_aux()
+       - 8 bytes are allocated by __cxa_get_globals() to keep __cxa_eh_globals
+       - 16 bytes are allocated by pthread_setspecific() which is called by __cxa_get_globals() to init TLS var for __cxa_eh_globals
+       - 88 bytes are allocated by pthread_setspecific() to init internal lock
+       */
+    int thrown_value;
+    try
+    {
+        throw 20;
+    }
+    catch (int e)
+    {
+        thrown_value = e;
+    }
+    TEST_ASSERT_EQUAL(20, thrown_value);
+    printf("OK?\n");
+}
+
+TEST_CASE("c++ exceptions emergency pool", "[cxx] [ignore]")
+{
+    /* Note: When first exception (in system) is thrown this test produces memory leaks report (~500 bytes):
+       - 392 bytes (can vary) as libunwind allocates memory to keep stack frames info to handle exceptions.
+         This info is kept until global destructors are called by __do_global_dtors_aux()
+       - 8 bytes are allocated by __cxa_get_globals() to keep __cxa_eh_globals
+       - 16 bytes are allocated by pthread_setspecific() which is called by __cxa_get_globals() to init TLS var for __cxa_eh_globals
+       - 88 bytes are allocated by pthread_setspecific() to init internal lock
+       */
+    void **p, **pprev = NULL;
+    int thrown_value = 0;
+    // throw first exception to ensure that all initial allocations are made
+    try
+    {
+        throw 33;
+    }
+    catch (int e)
+    {
+        thrown_value = e;
+    }
+    TEST_ASSERT_EQUAL(33, thrown_value);
+    // consume all dynamic memory
+    while ((p = (void **)malloc(sizeof(void *)))) {
+        if (pprev) {
+            *p = pprev;
+        } else {
+            *p = NULL;
+        }
+        pprev = p;
+    }
+    try
+    {
+        throw 20;
+    }
+    catch (int e)
+    {
+        thrown_value = e;
+        printf("Got exception %d\n", thrown_value);
+    }
+#if CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE > 0
+    // free all memory
+    while (pprev) {
+        p = (void **)(*pprev);
+        free(pprev);
+        pprev = p;
+    }
+    TEST_ASSERT_EQUAL(20, thrown_value);
+#else
+    // if emergency pool is disabled we should never get here,
+    // expect abort() due to lack of memory for new exception
+    TEST_ASSERT_TRUE(0 == 1);
+#endif
+}
+
+#else // !CONFIG_COMPILER_CXX_EXCEPTIONS
+
+TEST_CASE("std::out_of_range exception when -fno-exceptions", "[cxx][reset=abort,SW_CPU_RESET]")
+{
+    std::vector<int> v(10);
+    v.at(20) = 42;
+    TEST_FAIL_MESSAGE("Unreachable because we are aborted on the line above");
+}
+
+TEST_CASE("std::bad_alloc exception when -fno-exceptions", "[cxx][reset=abort,SW_CPU_RESET]")
+{
+    std::string s = std::string(2000000000, 'a');
+    (void)s;
+    TEST_FAIL_MESSAGE("Unreachable because we are aborted on the line above");
+}
+
+#endif
 
 /* These test cases pull a lot of code from libstdc++ and are disabled for now
  */

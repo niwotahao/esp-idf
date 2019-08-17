@@ -13,7 +13,14 @@
 // limitations under the License.
 #ifndef _SOC_RTC_IO_STRUCT_H_
 #define _SOC_RTC_IO_STRUCT_H_
-typedef volatile struct {
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef volatile struct rtc_io_dev_s {
     union {
         struct {
             uint32_t reserved0:        14;
@@ -277,4 +284,10 @@ typedef volatile struct {
         uint32_t val;
     } date;
 } rtc_io_dev_t;
+extern rtc_io_dev_t RTCIO;
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif  /* _SOC_RTC_IO_STRUCT_H_ */

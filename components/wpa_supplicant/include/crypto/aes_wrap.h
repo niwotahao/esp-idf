@@ -44,5 +44,4 @@ int __must_check aes_128_cbc_encrypt(const u8 *key, const u8 *iv, u8 *data,
 				     size_t data_len);
 int __must_check aes_128_cbc_decrypt(const u8 *key, const u8 *iv, u8 *data,
 				     size_t data_len);
-
 #endif /* AES_WRAP_H */

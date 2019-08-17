@@ -13,7 +13,14 @@
 // limitations under the License.
 #ifndef _SOC_PCNT_STRUCT_H_
 #define _SOC_PCNT_STRUCT_H_
-typedef volatile struct {
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef volatile struct pcnt_dev_s {
     struct{
         union {
             struct {
@@ -169,4 +176,9 @@ typedef volatile struct {
     uint32_t date;                                  /**/
 } pcnt_dev_t;
 extern pcnt_dev_t PCNT;
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif  /* _SOC_PCNT_STRUCT_H_ */

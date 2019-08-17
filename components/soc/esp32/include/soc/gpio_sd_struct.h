@@ -13,7 +13,14 @@
 // limitations under the License.
 #ifndef _SOC_GPIO_SD_STRUCT_H_
 #define _SOC_GPIO_SD_STRUCT_H_
-typedef volatile struct {
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef volatile struct gpio_sd_dev_s {
     union {
         struct {
             uint32_t duty:        8;
@@ -45,4 +52,9 @@ typedef volatile struct {
     } version;
 } gpio_sd_dev_t;
 extern gpio_sd_dev_t SIGMADELTA;
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif  /* _SOC_GPIO_SD_STRUCT_H_ */

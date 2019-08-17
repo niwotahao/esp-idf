@@ -92,20 +92,23 @@
 */
 
 #include <stdlib.h>
+#include <string.h>
 #include <xtensa/config/core.h>
 
 #include "xtensa_rtos.h"
 
-#include "rom/ets_sys.h"
+#include "esp32/rom/ets_sys.h"
+#include "soc/cpu.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "esp_panic.h"
+#include "esp_debug_helpers.h"
 #include "esp_heap_caps.h"
-#include "esp_crosscore_int.h"
+#include "esp_private/crosscore_int.h"
 
 #include "esp_intr_alloc.h"
+#include "esp_log.h"
 
 /* Defined in portasm.h */
 extern void _frxt_tick_timer_init(void);
@@ -121,6 +124,8 @@ extern void _xt_coproc_init(void);
     #define SYSTICK_INTR_ID (ETS_INTERNAL_TIMER1_INTR_SOURCE+ETS_INTERNAL_INTR_SOURCE_OFF)
 #endif
 
+_Static_assert(tskNO_AFFINITY == CONFIG_FREERTOS_NO_AFFINITY, "incorrect tskNO_AFFINITY value");
+
 /*-----------------------------------------------------------*/
 
 unsigned port_xSchedulerRunning[portNUM_PROCESSORS] = {0}; // Duplicate of inaccessible xSchedulerRunning; needed at startup to avoid counting nesting
@@ -130,6 +135,18 @@ unsigned port_interruptNesting[portNUM_PROCESSORS] = {0};  // Interrupt nesting 
 
 // User exception dispatcher when exiting
 void _xt_user_exit(void);
+
+#if CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER
+// Wrapper to allow task functions to return (increases stack overhead by 16 bytes)
+static void vPortTaskWrapper(TaskFunction_t pxCode, void *pvParameters)
+{
+	pxCode(pvParameters);
+	//FreeRTOS tasks should not return. Log the task name and abort.
+	char * pcTaskName = pcTaskGetTaskName(NULL);
+	ESP_LOGE("FreeRTOS", "FreeRTOS Task \"%s\" should not return, Aborting now!", pcTaskName);
+	abort();
+}
+#endif
 
 /*
  * Stack initialization
@@ -145,9 +162,24 @@ StackType_t *pxPortInitialiseStack( StackType_t *pxTopOfStack, TaskFunction_t px
 	#if XCHAL_CP_NUM > 0
 	uint32_t *p;
 	#endif
+	uint32_t *threadptr;
+	void *task_thread_local_start;
+	extern int _thread_local_start, _thread_local_end, _rodata_start;
+	// TODO: check that TLS area fits the stack
+	uint32_t thread_local_sz = (uint8_t *)&_thread_local_end - (uint8_t *)&_thread_local_start;
 
-	/* Create interrupt stack frame aligned to 16 byte boundary */
-	sp = (StackType_t *) (((UBaseType_t)(pxTopOfStack + 1) - XT_CP_SIZE - XT_STK_FRMSZ) & ~0xf);
+	thread_local_sz = ALIGNUP(0x10, thread_local_sz);
+
+	/* Initialize task's stack so that we have the following structure at the top:
+
+		----LOW ADDRESSES ----------------------------------------HIGH ADDRESSES----------
+		 task stack | interrupt stack frame | thread local vars | co-processor save area |
+		----------------------------------------------------------------------------------
+					|																	 |
+					SP 																pxTopOfStack
+
+		All parts are aligned to 16 byte boundary. */
+	sp = (StackType_t *) (((UBaseType_t)(pxTopOfStack + 1) - XT_CP_SIZE - thread_local_sz - XT_STK_FRMSZ) & ~0xf);
 
 	/* Clear the entire frame (do not use memset() because we don't depend on C library) */
 	for (tp = sp; tp <= pxTopOfStack; ++tp)
@@ -156,19 +188,33 @@ StackType_t *pxPortInitialiseStack( StackType_t *pxTopOfStack, TaskFunction_t px
 	frame = (XtExcFrame *) sp;
 
 	/* Explicitly initialize certain saved registers */
-	frame->pc   = (UBaseType_t) pxCode;             /* task entrypoint                */
-	frame->a0   = 0;                                /* to terminate GDB backtrace     */
-	frame->a1   = (UBaseType_t) sp + XT_STK_FRMSZ;  /* physical top of stack frame    */
-	frame->exit = (UBaseType_t) _xt_user_exit;      /* user exception exit dispatcher */
+	#if CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER
+	frame->pc	= (UBaseType_t) vPortTaskWrapper;	/* task wrapper						*/
+	#else
+	frame->pc   = (UBaseType_t) pxCode;				/* task entrypoint					*/
+	#endif
+	frame->a0	= 0;								/* to terminate GDB backtrace		*/
+	frame->a1	= (UBaseType_t) sp + XT_STK_FRMSZ;	/* physical top of stack frame		*/
+	frame->exit = (UBaseType_t) _xt_user_exit;		/* user exception exit dispatcher	*/
 
 	/* Set initial PS to int level 0, EXCM disabled ('rfe' will enable), user mode. */
 	/* Also set entry point argument parameter. */
 	#ifdef __XTENSA_CALL0_ABI__
-	frame->a2 = (UBaseType_t) pvParameters;
+		#if CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER
+		frame->a2 = (UBaseType_t) pxCode;
+		frame->a3 = (UBaseType_t) pvParameters;
+		#else
+		frame->a2 = (UBaseType_t) pvParameters;
+		#endif
 	frame->ps = PS_UM | PS_EXCM;
 	#else
 	/* + for windowed ABI also set WOE and CALLINC (pretend task was 'call4'd). */
-	frame->a6 = (UBaseType_t) pvParameters;
+		#if CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER
+		frame->a6 = (UBaseType_t) pxCode;
+		frame->a7 = (UBaseType_t) pvParameters;
+		#else
+		frame->a6 = (UBaseType_t) pvParameters;
+		#endif
 	frame->ps = PS_UM | PS_EXCM | PS_WOE | PS_CALLINC(1);
 	#endif
 
@@ -176,6 +222,14 @@ StackType_t *pxPortInitialiseStack( StackType_t *pxTopOfStack, TaskFunction_t px
 	/* Set the initial virtual priority mask value to all 1's. */
 	frame->vpri = 0xFFFFFFFF;
 	#endif
+
+	/* Init threadptr reg and TLS vars */
+	task_thread_local_start = (void *)(((uint32_t)pxTopOfStack - XT_CP_SIZE - thread_local_sz) & ~0xf);
+	memcpy(task_thread_local_start, &_thread_local_start, thread_local_sz);
+	threadptr = (uint32_t *)(sp + XT_STK_EXTRA);
+	/* shift threadptr by the offset of _thread_local_start from DROM start;
+	   need to take into account extra 16 bytes offset */
+	*threadptr = (uint32_t)task_thread_local_start - ((uint32_t)&_thread_local_start - (uint32_t)&_rodata_start) - 0x10;
 
 	#if XCHAL_CP_NUM > 0
 	/* Init the coprocessor save area (see xtensa_context.h) */
@@ -277,7 +331,7 @@ void vPortReleaseTaskMPUSettings( xMPU_SETTINGS *xMPUSettings )
  * Returns true if the current core is in ISR context; low prio ISR, med prio ISR or timer tick ISR. High prio ISRs
  * aren't detected here, but they normally cannot call C code, so that should not be an issue anyway.
  */
-BaseType_t xPortInIsrContext()
+BaseType_t xPortInIsrContext(void)
 {
 	unsigned int irqStatus;
 	BaseType_t ret;
@@ -287,8 +341,16 @@ BaseType_t xPortInIsrContext()
 	return ret;
 }
 
+/*
+ * This function will be called in High prio ISRs. Returns true if the current core was in ISR context
+ * before calling into high prio ISR context.
+ */
+BaseType_t IRAM_ATTR xPortInterruptedFromISRContext(void)
+{
+	return (port_interruptNesting[xPortGetCoreID()] != 0);
+}
 
-void vPortAssertIfInISR()
+void vPortAssertIfInISR(void)
 {
 	configASSERT(xPortInIsrContext());
 }
@@ -297,134 +359,69 @@ void vPortAssertIfInISR()
  * For kernel use: Initialize a per-CPU mux. Mux will be initialized unlocked.
  */
 void vPortCPUInitializeMutex(portMUX_TYPE *mux) {
+
 #ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
 	ets_printf("Initializing mux %p\n", mux);
 	mux->lastLockedFn="(never locked)";
 	mux->lastLockedLine=-1;
 #endif
-	mux->mux=portMUX_FREE_VAL;
+	mux->owner=portMUX_FREE_VAL;
+	mux->count=0;
 }
 
+#include "portmux_impl.h"
 
 /*
  * For kernel use: Acquire a per-CPU mux. Spinlocks, so don't hold on to these muxes for too long.
  */
 #ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
 void vPortCPUAcquireMutex(portMUX_TYPE *mux, const char *fnName, int line) {
+	unsigned int irqStatus = portENTER_CRITICAL_NESTED();
+	vPortCPUAcquireMutexIntsDisabled(mux, portMUX_NO_TIMEOUT, fnName, line);
+	portEXIT_CRITICAL_NESTED(irqStatus);
+}
+
+bool vPortCPUAcquireMutexTimeout(portMUX_TYPE *mux, int timeout_cycles, const char *fnName, int line) {
+	unsigned int irqStatus = portENTER_CRITICAL_NESTED();
+	bool result = vPortCPUAcquireMutexIntsDisabled(mux, timeout_cycles, fnName, line);
+	portEXIT_CRITICAL_NESTED(irqStatus);
+	return result;
+}
+
 #else
 void vPortCPUAcquireMutex(portMUX_TYPE *mux) {
-#endif
-#if !CONFIG_FREERTOS_UNICORE
-	uint32_t res;
-	uint32_t recCnt;
-	unsigned int irqStatus;
-#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
-	uint32_t cnt=(1<<16);
-	if ( (mux->mux & portMUX_MAGIC_MASK) != portMUX_MAGIC_VAL ) {
-		ets_printf("ERROR: vPortCPUAcquireMutex: mux %p is uninitialized (0x%X)! Called from %s line %d.\n", mux, mux->mux, fnName, line);
-		mux->mux=portMUX_FREE_VAL;
-	}
+	unsigned int irqStatus = portENTER_CRITICAL_NESTED();
+	vPortCPUAcquireMutexIntsDisabled(mux, portMUX_NO_TIMEOUT);
+	portEXIT_CRITICAL_NESTED(irqStatus);
+}
+
+bool vPortCPUAcquireMutexTimeout(portMUX_TYPE *mux, int timeout_cycles) {
+	unsigned int irqStatus = portENTER_CRITICAL_NESTED();
+	bool result = vPortCPUAcquireMutexIntsDisabled(mux, timeout_cycles);
+	portEXIT_CRITICAL_NESTED(irqStatus);
+	return result;
+}
 #endif
 
-	irqStatus=portENTER_CRITICAL_NESTED();
-	do {
-		//Lock mux if it's currently unlocked
-		res=(xPortGetCoreID()<<portMUX_VAL_SHIFT)|portMUX_MAGIC_VAL;
-		uxPortCompareSet(&mux->mux, portMUX_FREE_VAL, &res);
-		//If it wasn't free and we're the owner of the lock, we are locking recursively.
-		if ( (res != portMUX_FREE_VAL) && (((res&portMUX_VAL_MASK)>>portMUX_VAL_SHIFT) == xPortGetCoreID()) ) {
-			//Mux was already locked by us. Just bump the recurse count by one.
-			recCnt=(res&portMUX_CNT_MASK)>>portMUX_CNT_SHIFT;
-			recCnt++;
-#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG_RECURSIVE
-			ets_printf("Recursive lock: recCnt=%d last non-recursive lock %s line %d, curr %s line %d\n", recCnt, mux->lastLockedFn, mux->lastLockedLine, fnName, line);
-#endif
-			mux->mux=portMUX_MAGIC_VAL|(recCnt<<portMUX_CNT_SHIFT)|(xPortGetCoreID()<<portMUX_VAL_SHIFT);
-			break;
-		}
-#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
-        cnt--;
-		if (cnt==0) {
-			ets_printf("Timeout on mux! last non-recursive lock %s line %d, curr %s line %d\n", mux->lastLockedFn, mux->lastLockedLine, fnName, line);
-			ets_printf("Mux value %X\n", mux->mux);
-		}
-#endif
-	} while (res!=portMUX_FREE_VAL);
-#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
-	if (res==portMUX_FREE_VAL) { //initial lock
-		mux->lastLockedFn=fnName;
-		mux->lastLockedLine=line;
-	}
-#endif
-	portEXIT_CRITICAL_NESTED(irqStatus);
-#endif
-}
 
 /*
- * For kernel use: Release a per-CPU mux. Returns true if everything is OK, false if mux
- * was already unlocked or is locked by a different core.
+ * For kernel use: Release a per-CPU mux
+ *
+ * Mux must be already locked by this core
  */
 #ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
-portBASE_TYPE vPortCPUReleaseMutex(portMUX_TYPE *mux, const char *fnName, int line) {
-#else
-portBASE_TYPE vPortCPUReleaseMutex(portMUX_TYPE *mux) {
-#endif
-#if !CONFIG_FREERTOS_UNICORE
-	uint32_t res=0;
-	uint32_t recCnt;
-	unsigned int irqStatus;
-	portBASE_TYPE ret=pdTRUE;
-//	ets_printf("Unlock %p\n", mux);
-	irqStatus=portENTER_CRITICAL_NESTED();
-#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
-	const char *lastLockedFn=mux->lastLockedFn;
-	int lastLockedLine=mux->lastLockedLine;
-	mux->lastLockedFn=fnName;
-	mux->lastLockedLine=line;
-	if ( (mux->mux & portMUX_MAGIC_MASK) != portMUX_MAGIC_VAL ) ets_printf("ERROR: vPortCPUReleaseMutex: mux %p is uninitialized (0x%X)!\n", mux, mux->mux);
-#endif
-	//Unlock mux if it's currently locked with a recurse count of 0
-	res=portMUX_FREE_VAL;
-	uxPortCompareSet(&mux->mux, (xPortGetCoreID()<<portMUX_VAL_SHIFT)|portMUX_MAGIC_VAL, &res);
-
-	if ( ((res&portMUX_VAL_MASK)>>portMUX_VAL_SHIFT) == xPortGetCoreID() ) {
-		//Lock is valid, we can return safely. Just need to check if it's a recursive lock; if so we need to decrease the refcount.
-		 if ( ((res&portMUX_CNT_MASK)>>portMUX_CNT_SHIFT)!=0) {
-			//We locked this, but the reccount isn't zero. Decrease refcount and continue.
-			recCnt=(res&portMUX_CNT_MASK)>>portMUX_CNT_SHIFT;
-			recCnt--;
-#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG_RECURSIVE
-			ets_printf("Recursive unlock: recCnt=%d last locked %s line %d, curr %s line %d\n", recCnt, lastLockedFn, lastLockedLine, fnName, line);
-#endif
-			mux->mux=portMUX_MAGIC_VAL|(recCnt<<portMUX_CNT_SHIFT)|(xPortGetCoreID()<<portMUX_VAL_SHIFT);
-		}
-	} else if ( res == portMUX_FREE_VAL ) {
-#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
-		ets_printf("ERROR: vPortCPUReleaseMutex: mux %p was already unlocked!\n", mux);
-		ets_printf("Last non-recursive unlock %s line %d, curr unlock %s line %d\n", lastLockedFn, lastLockedLine, fnName, line);
-#endif
-		ret=pdFALSE;
-	} else {
-#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
-		ets_printf("ERROR: vPortCPUReleaseMutex: mux %p wasn't locked by this core (%d) but by core %d (ret=%x, mux=%x).\n", mux, xPortGetCoreID(), ((res&portMUX_VAL_MASK)>>portMUX_VAL_SHIFT), res, mux->mux);
-		ets_printf("Last non-recursive lock %s line %d\n", lastLockedFn, lastLockedLine);
-		ets_printf("Called by %s line %d\n", fnName, line);
-#endif
-		ret=pdFALSE;
-	}
+void vPortCPUReleaseMutex(portMUX_TYPE *mux, const char *fnName, int line) {
+	unsigned int irqStatus = portENTER_CRITICAL_NESTED();
+	vPortCPUReleaseMutexIntsDisabled(mux, fnName, line);
 	portEXIT_CRITICAL_NESTED(irqStatus);
-	return ret;
-#else //!CONFIG_FREERTOS_UNICORE
-	return 0;
-#endif
 }
-
-#if CONFIG_FREERTOS_BREAK_ON_SCHEDULER_START_JTAG
-void vPortFirstTaskHook(TaskFunction_t function) {
-	esp_set_breakpoint_if_jtag(function);
+#else
+void vPortCPUReleaseMutex(portMUX_TYPE *mux) {
+	unsigned int irqStatus = portENTER_CRITICAL_NESTED();
+	vPortCPUReleaseMutexIntsDisabled(mux);
+	portEXIT_CRITICAL_NESTED(irqStatus);
 }
 #endif
-
 
 void vPortSetStackWatchpoint( void* pxStackStart ) {
 	//Set watchpoint 1 to watch the last 32 bytes of the stack.
@@ -438,33 +435,34 @@ void vPortSetStackWatchpoint( void* pxStackStart ) {
 	esp_set_watchpoint(1, (char*)addr, 32, ESP_WATCHPOINT_STORE);
 }
 
+#if defined(CONFIG_ESP32_SPIRAM_SUPPORT)
+/*
+ * Compare & set (S32C1) does not work in external RAM. Instead, this routine uses a mux (in internal memory) to fake it.
+ */
+static portMUX_TYPE extram_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void uxPortCompareSetExtram(volatile uint32_t *addr, uint32_t compare, uint32_t *set) {
+	uint32_t prev;
+#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
+	vPortCPUAcquireMutexIntsDisabled(&extram_mux, portMUX_NO_TIMEOUT, __FUNCTION__, __LINE__);
+#else
+	vPortCPUAcquireMutexIntsDisabled(&extram_mux, portMUX_NO_TIMEOUT);
+#endif
+	prev=*addr;
+	if (prev==compare) {
+		*addr=*set;
+	}
+	*set=prev;
+#ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
+	vPortCPUReleaseMutexIntsDisabled(&extram_mux, __FUNCTION__, __LINE__);
+#else
+	vPortCPUReleaseMutexIntsDisabled(&extram_mux);
+#endif
+}
+#endif //defined(CONFIG_ESP32_SPIRAM_SUPPORT)
+
+
+
 uint32_t xPortGetTickRateHz(void) {
 	return (uint32_t)configTICK_RATE_HZ;
 }
-
-/* Heap functions, wrappers around heap_caps_xxx functions
-
-   NB: libc malloc() & free() are also defined & available
-   for this purpose.
- */
-
-void *pvPortMalloc( size_t xWantedSize )
-{
-	return heap_caps_malloc(xWantedSize, MALLOC_CAP_8BIT);
-}
-
-void vPortFree( void *pv )
-{
-	return heap_caps_free(pv);
-}
-
-size_t xPortGetFreeHeapSize( void ) PRIVILEGED_FUNCTION
-{
-	return heap_caps_get_free_size( MALLOC_CAP_8BIT );
-}
-
-size_t xPortGetMinimumEverFreeHeapSize( void ) PRIVILEGED_FUNCTION
-{
-	return heap_caps_get_minimum_free_size( MALLOC_CAP_8BIT );
-}
-

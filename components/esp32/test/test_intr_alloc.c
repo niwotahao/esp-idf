@@ -4,7 +4,7 @@
 
 #include <esp_types.h>
 #include <stdio.h>
-#include "rom/ets_sys.h"
+#include "esp32/rom/ets_sys.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -12,10 +12,11 @@
 #include "freertos/queue.h"
 #include "freertos/xtensa_api.h"
 #include "unity.h"
-#include "soc/uart_reg.h"
+#include "soc/uart_periph.h"
 #include "soc/dport_reg.h"
-#include "soc/io_mux_reg.h"
+#include "soc/gpio_periph.h"
 #include "esp_intr_alloc.h"
+#include "driver/periph_ctrl.h"
 #include "driver/timer.h"
 
 
@@ -143,7 +144,7 @@ void int_timer_handler(void *arg) {
     int_timer_ctr++;
 }
 
-void local_timer_test()
+void local_timer_test(void)
 {
     intr_handle_t ih;
     esp_err_t r;
@@ -228,3 +229,109 @@ TEST_CASE("Can allocate IRAM int only with an IRAM handler", "[esp32]")
     err = esp_intr_free(ih);
     TEST_ESP_OK(err);
 }
+
+
+#include "soc/spi_periph.h"
+typedef struct {
+    bool flag1;
+    bool flag2;
+    bool flag3;
+    bool flag4;
+} intr_alloc_test_ctx_t;
+
+void IRAM_ATTR int_handler1(void* arg)
+{
+    intr_alloc_test_ctx_t* ctx=(intr_alloc_test_ctx_t*)arg;
+    ets_printf("handler 1 called.\n");
+    if ( ctx->flag1 ) {
+        ctx->flag3 = true;
+    } else {
+        ctx->flag1 = true;
+    }
+    SPI2.slave.trans_done = 0;
+}
+
+void IRAM_ATTR int_handler2(void* arg)
+{
+    intr_alloc_test_ctx_t* ctx = (intr_alloc_test_ctx_t*)arg;
+    ets_printf("handler 2 called.\n");
+    if ( ctx->flag2 ) {
+        ctx->flag4 = true;
+    } else {
+        ctx->flag2 = true;
+    }
+}
+
+TEST_CASE("allocate 2 handlers for a same source and remove the later one","[esp32]")
+{
+    intr_alloc_test_ctx_t ctx = {false, false, false, false };
+    intr_handle_t handle1, handle2;
+
+    //enable HSPI(spi2)
+    periph_module_enable(PERIPH_HSPI_MODULE);
+
+    esp_err_t r;
+    r=esp_intr_alloc(ETS_SPI2_INTR_SOURCE, ESP_INTR_FLAG_SHARED, int_handler1, &ctx, &handle1);
+    TEST_ESP_OK(r);
+    //try an invalid assign first
+    r=esp_intr_alloc(ETS_SPI2_INTR_SOURCE, 0, int_handler2, NULL, &handle2);
+    TEST_ASSERT_EQUAL_INT(r, ESP_ERR_NOT_FOUND );
+    //assign shared then
+    r=esp_intr_alloc(ETS_SPI2_INTR_SOURCE, ESP_INTR_FLAG_SHARED, int_handler2, &ctx, &handle2);
+    TEST_ESP_OK(r);
+    SPI2.slave.trans_inten = 1;
+    
+    printf("trigger first time.\n");
+    SPI2.slave.trans_done = 1;
+
+    vTaskDelay(100);
+    TEST_ASSERT( ctx.flag1 && ctx.flag2 );
+
+    printf("remove intr 1.\n");
+    r=esp_intr_free(handle2);
+
+    printf("trigger second time.\n");
+    SPI2.slave.trans_done = 1;
+
+    vTaskDelay(500);
+    TEST_ASSERT( ctx.flag3 && !ctx.flag4 );
+    printf("test passed.\n");
+}
+
+#ifndef CONFIG_FREERTOS_UNICORE
+
+void isr_free_task(void *param)
+{
+    esp_err_t ret = ESP_FAIL;
+    intr_handle_t *test_handle = (intr_handle_t *)param;
+    if(*test_handle != NULL) {
+        ret = esp_intr_free(*test_handle);
+        if(ret == ESP_OK) {
+            *test_handle = NULL;
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+void isr_alloc_free_test(void)
+{
+    intr_handle_t test_handle = NULL;
+    esp_err_t ret = esp_intr_alloc(ETS_SPI2_INTR_SOURCE, 0, int_handler1, NULL, &test_handle);
+    if(ret != ESP_OK) {
+        printf("alloc isr handle fail\n");
+    } else {
+        printf("alloc isr handle on core %d\n",esp_intr_get_cpu(test_handle));
+    }
+    TEST_ASSERT(ret == ESP_OK);
+    xTaskCreatePinnedToCore(isr_free_task, "isr_free_task", 1024*2, (void *)&test_handle, 10, NULL, !xPortGetCoreID());
+    vTaskDelay(1000/portTICK_RATE_MS);
+    TEST_ASSERT(test_handle == NULL);
+    printf("test passed\n");
+}
+
+TEST_CASE("alloc and free isr handle on different core", "[esp32]")
+{
+    isr_alloc_free_test();
+}
+
+#endif

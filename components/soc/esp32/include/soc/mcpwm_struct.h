@@ -13,7 +13,14 @@
 // limitations under the License.
 #ifndef _SOC_MCPWM_STRUCT_H__
 #define _SOC_MCPWM_STRUCT_H__
-typedef volatile struct {
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef volatile struct mcpwm_dev_s {
     union {
         struct {
             uint32_t prescale: 8;                  /*Period of PWM_clk = 6.25ns * (PWM_CLK_PRESCALE + 1)*/
@@ -449,4 +456,9 @@ typedef volatile struct {
 } mcpwm_dev_t;
 extern mcpwm_dev_t MCPWM0;
 extern mcpwm_dev_t MCPWM1;
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif  /* _SOC_MCPWM_STRUCT_H__ */

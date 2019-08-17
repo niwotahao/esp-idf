@@ -15,7 +15,7 @@
 #include "esp_attr.h"
 #include "soc/cpu.h"
 #include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
+#include "soc/rtc_periph.h"
 #include "sdkconfig.h"
 
 void IRAM_ATTR esp_cpu_stall(int cpu_id)
@@ -44,7 +44,13 @@ void IRAM_ATTR esp_cpu_unstall(int cpu_id)
     }
 }
 
-bool IRAM_ATTR esp_cpu_in_ocd_debug_mode()
+void IRAM_ATTR esp_cpu_reset(int cpu_id)
+{
+    SET_PERI_REG_MASK(RTC_CNTL_OPTIONS0_REG,
+            cpu_id == 0 ? RTC_CNTL_SW_PROCPU_RST_M : RTC_CNTL_SW_APPCPU_RST_M);
+}
+
+bool IRAM_ATTR esp_cpu_in_ocd_debug_mode(void)
 {
 #if CONFIG_ESP32_DEBUG_OCDAWARE
     int dcr;

@@ -13,7 +13,14 @@
 // limitations under the License.
 #ifndef _SOC_I2S_STRUCT_H_
 #define _SOC_I2S_STRUCT_H_
-typedef volatile struct {
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef volatile struct i2s_dev_s {
     uint32_t reserved_0;
     uint32_t reserved_4;
     union {
@@ -457,5 +464,9 @@ typedef volatile struct {
 } i2s_dev_t;
 extern i2s_dev_t I2S0;
 extern i2s_dev_t I2S1;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* _SOC_I2S_STRUCT_H_ */

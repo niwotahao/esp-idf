@@ -123,6 +123,7 @@ extern "C" {
 #endif
 
 #include "mpu_wrappers.h"
+#include "esp_system.h"
 
 /*
  * Setup the stack of a new task so it is ready to be placed under the
@@ -143,11 +144,10 @@ extern "C" {
  * non-FreeRTOS-specific code, and behave the same as
  * pvPortMalloc()/vPortFree().
  */
-void *pvPortMalloc( size_t xSize ) PRIVILEGED_FUNCTION;
-void vPortFree( void *pv ) PRIVILEGED_FUNCTION;
-void vPortInitialiseBlocks( void ) PRIVILEGED_FUNCTION;
-size_t xPortGetFreeHeapSize( void ) PRIVILEGED_FUNCTION;
-size_t xPortGetMinimumEverFreeHeapSize( void ) PRIVILEGED_FUNCTION;
+#define pvPortMalloc malloc
+#define vPortFree free
+#define xPortGetFreeHeapSize esp_get_free_heap_size
+#define xPortGetMinimumEverFreeHeapSize esp_get_minimum_free_heap_size
 
 /*
  * Setup the hardware ready for the scheduler to take control.  This generally
@@ -181,7 +181,13 @@ void vPortSetStackWatchpoint( void* pxStackStart );
  * Returns true if the current core is in ISR context; low prio ISR, med prio ISR or timer tick ISR. High prio ISRs
  * aren't detected here, but they normally cannot call C code, so that should not be an issue anyway.
  */
-BaseType_t xPortInIsrContext();
+BaseType_t xPortInIsrContext(void);
+
+/*
+ * This function will be called in High prio ISRs. Returns true if the current core was in ISR context
+ * before calling into high prio ISR context.
+ */
+BaseType_t xPortInterruptedFromISRContext(void);
 
 /*
  * The structures and methods of manipulating the MPU are contained within the
@@ -197,9 +203,9 @@ BaseType_t xPortInIsrContext();
 #endif
 
 /* Multi-core: get current core ID */
-static inline uint32_t xPortGetCoreID() {
-    int id;
-    asm volatile(
+static inline uint32_t IRAM_ATTR xPortGetCoreID(void) {
+    uint32_t id;
+    __asm__ __volatile__ (
         "rsr.prid %0\n"
         " extui %0,%0,13,1"
         :"=r"(id));
@@ -212,6 +218,8 @@ uint32_t xPortGetTickRateHz(void);
 #ifdef __cplusplus
 }
 #endif
+
+void uxPortCompareSetExtram(volatile uint32_t *addr, uint32_t compare, uint32_t *set);
 
 #endif /* PORTABLE_H */
 

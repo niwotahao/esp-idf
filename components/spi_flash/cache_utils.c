@@ -20,8 +20,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
-#include <rom/spi_flash.h>
-#include <rom/cache.h>
+#include <esp32/rom/spi_flash.h>
+#include <esp32/rom/cache.h>
 #include <soc/soc.h>
 #include <soc/dport_reg.h>
 #include "sdkconfig.h"
@@ -45,21 +45,27 @@ static volatile bool s_flash_op_complete = false;
 static volatile int s_flash_op_cpu = -1;
 #endif
 
-void spi_flash_init_lock()
+void spi_flash_init_lock(void)
 {
-    s_flash_op_mutex = xSemaphoreCreateMutex();
+    s_flash_op_mutex = xSemaphoreCreateRecursiveMutex();
     assert(s_flash_op_mutex != NULL);
 }
 
-void spi_flash_op_lock()
+void spi_flash_op_lock(void)
 {
-    xSemaphoreTake(s_flash_op_mutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(s_flash_op_mutex, portMAX_DELAY);
 }
 
-void spi_flash_op_unlock()
+void spi_flash_op_unlock(void)
 {
-    xSemaphoreGive(s_flash_op_mutex);
+    xSemaphoreGiveRecursive(s_flash_op_mutex);
 }
+/*
+ If you're going to modify this, keep in mind that while the flash caches of the pro and app
+ cpu are separate, the psram cache is *not*. If one of the CPUs returns from a flash routine 
+ with its cache enabled but the other CPUs cache is not enabled yet, you will have problems
+ when accessing psram from the former CPU.
+*/
 
 void IRAM_ATTR spi_flash_op_block_func(void* arg)
 {
@@ -68,8 +74,6 @@ void IRAM_ATTR spi_flash_op_block_func(void* arg)
     // Restore interrupts that aren't located in IRAM
     esp_intr_noniram_disable();
     uint32_t cpuid = (uint32_t) arg;
-    // Disable cache so that flash operation can start
-    spi_flash_disable_cache(cpuid, &s_flash_op_cache_state[cpuid]);
     // s_flash_op_complete flag is cleared on *this* CPU, otherwise the other
     // CPU may reset the flag back to false before IPC task has a chance to check it
     // (if it is preempted by an ISR taking non-trivial amount of time)
@@ -86,7 +90,7 @@ void IRAM_ATTR spi_flash_op_block_func(void* arg)
     xTaskResumeAll();
 }
 
-void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu()
+void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu(void)
 {
     spi_flash_op_lock();
 
@@ -106,6 +110,10 @@ void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu()
         assert(other_cpuid == 1);
         spi_flash_disable_cache(other_cpuid, &s_flash_op_cache_state[other_cpuid]);
     } else {
+        // Temporarily raise current task priority to prevent a deadlock while
+        // waiting for IPC task to start on the other CPU
+        int old_prio = uxTaskPriorityGet(NULL);
+        vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
         // Signal to the spi_flash_op_block_task on the other CPU that we need it to
         // disable cache there and block other tasks from executing.
         s_flash_op_can_start = false;
@@ -117,39 +125,43 @@ void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu()
         }
         // Disable scheduler on the current CPU
         vTaskSuspendAll();
+        // Can now set the priority back to the normal one
+        vTaskPrioritySet(NULL, old_prio);
         // This is guaranteed to run on CPU <cpuid> because the other CPU is now
         // occupied by highest priority task
         assert(xPortGetCoreID() == cpuid);
     }
     // Kill interrupts that aren't located in IRAM
     esp_intr_noniram_disable();
-    // Disable cache on this CPU as well
+    // This CPU executes this routine, with non-IRAM interrupts and the scheduler 
+    // disabled. The other CPU is spinning in the spi_flash_op_block_func task, also
+    // with non-iram interrupts and the scheduler disabled. None of these CPUs will
+    // touch external RAM or flash this way, so we can safely disable caches.
     spi_flash_disable_cache(cpuid, &s_flash_op_cache_state[cpuid]);
+    spi_flash_disable_cache(other_cpuid, &s_flash_op_cache_state[other_cpuid]);
 }
 
-void IRAM_ATTR spi_flash_enable_interrupts_caches_and_other_cpu()
+void IRAM_ATTR spi_flash_enable_interrupts_caches_and_other_cpu(void)
 {
     const uint32_t cpuid = xPortGetCoreID();
     const uint32_t other_cpuid = (cpuid == 0) ? 1 : 0;
 #ifndef NDEBUG
     // Sanity check: flash operation ends on the same CPU as it has started
     assert(cpuid == s_flash_op_cpu);
+    // More sanity check: if scheduler isn't started, only CPU0 can call this.
+    assert(!(xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED && cpuid != 0));
     s_flash_op_cpu = -1;
 #endif
 
-    // Re-enable cache on this CPU
+    // Re-enable cache on both CPUs. After this, cache (flash and external RAM) should work again.
     spi_flash_restore_cache(cpuid, s_flash_op_cache_state[cpuid]);
+    spi_flash_restore_cache(other_cpuid, s_flash_op_cache_state[other_cpuid]);
 
-    if (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED) {
-        // Scheduler is not running yet — this means we are running on PRO CPU.
-        // other_cpuid is APP CPU, and it is either in reset or is spinning in
-        // user_start_cpu1, which is in IRAM. So we can simply reenable cache.
-        assert(other_cpuid == 1);
-        spi_flash_restore_cache(other_cpuid, s_flash_op_cache_state[other_cpuid]);
-    } else {
+    if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) {
         // Signal to spi_flash_op_block_task that flash operation is complete
         s_flash_op_complete = true;
     }
+
     // Re-enable non-iram interrupts
     esp_intr_noniram_enable();
 
@@ -166,7 +178,7 @@ void IRAM_ATTR spi_flash_enable_interrupts_caches_and_other_cpu()
     spi_flash_op_unlock();
 }
 
-void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu_no_os()
+void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu_no_os(void)
 {
     const uint32_t cpuid = xPortGetCoreID();
     const uint32_t other_cpuid = (cpuid == 0) ? 1 : 0;
@@ -179,7 +191,7 @@ void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu_no_os()
     spi_flash_disable_cache(cpuid, &s_flash_op_cache_state[cpuid]);
 }
 
-void IRAM_ATTR spi_flash_enable_interrupts_caches_no_os()
+void IRAM_ATTR spi_flash_enable_interrupts_caches_no_os(void)
 {
     const uint32_t cpuid = xPortGetCoreID();
 
@@ -191,36 +203,36 @@ void IRAM_ATTR spi_flash_enable_interrupts_caches_no_os()
 
 #else // CONFIG_FREERTOS_UNICORE
 
-void spi_flash_init_lock()
+void spi_flash_init_lock(void)
 {
 }
 
-void spi_flash_op_lock()
+void spi_flash_op_lock(void)
 {
     vTaskSuspendAll();
 }
 
-void spi_flash_op_unlock()
+void spi_flash_op_unlock(void)
 {
     xTaskResumeAll();
 }
 
 
-void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu()
+void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu(void)
 {
     spi_flash_op_lock();
     esp_intr_noniram_disable();
     spi_flash_disable_cache(0, &s_flash_op_cache_state[0]);
 }
 
-void IRAM_ATTR spi_flash_enable_interrupts_caches_and_other_cpu()
+void IRAM_ATTR spi_flash_enable_interrupts_caches_and_other_cpu(void)
 {
     spi_flash_restore_cache(0, s_flash_op_cache_state[0]);
     esp_intr_noniram_enable();
     spi_flash_op_unlock();
 }
 
-void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu_no_os()
+void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu_no_os(void)
 {
     // Kill interrupts that aren't located in IRAM
     esp_intr_noniram_disable();
@@ -228,7 +240,7 @@ void IRAM_ATTR spi_flash_disable_interrupts_caches_and_other_cpu_no_os()
     spi_flash_disable_cache(0, &s_flash_op_cache_state[0]);
 }
 
-void IRAM_ATTR spi_flash_enable_interrupts_caches_no_os()
+void IRAM_ATTR spi_flash_enable_interrupts_caches_no_os(void)
 {
     // Re-enable cache on this CPU
     spi_flash_restore_cache(0, s_flash_op_cache_state[0]);
@@ -279,8 +291,11 @@ static void IRAM_ATTR spi_flash_restore_cache(uint32_t cpuid, uint32_t saved_sta
 }
 
 
-IRAM_ATTR bool spi_flash_cache_enabled()
+IRAM_ATTR bool spi_flash_cache_enabled(void)
 {
-    return DPORT_REG_GET_BIT(DPORT_PRO_CACHE_CTRL_REG, DPORT_PRO_CACHE_ENABLE)
-        && DPORT_REG_GET_BIT(DPORT_APP_CACHE_CTRL_REG, DPORT_APP_CACHE_ENABLE);
+    bool result = (DPORT_REG_GET_BIT(DPORT_PRO_CACHE_CTRL_REG, DPORT_PRO_CACHE_ENABLE) != 0);
+#if portNUM_PROCESSORS == 2
+    result = result && (DPORT_REG_GET_BIT(DPORT_APP_CACHE_CTRL_REG, DPORT_APP_CACHE_ENABLE) != 0);
+#endif
+    return result;
 }

@@ -58,6 +58,27 @@ typedef struct {
     .unused = 0, \
     .type = RELOC_TYPE_BRANCH }
 
+/* Comparison function used to sort the relocations array */
+static int reloc_sort_func(const void* p_lhs, const void* p_rhs)
+{
+    const reloc_info_t lhs = *(const reloc_info_t*) p_lhs;
+    const reloc_info_t rhs = *(const reloc_info_t*) p_rhs;
+    if (lhs.label < rhs.label) {
+        return -1;
+    } else if (lhs.label > rhs.label) {
+        return 1;
+    }
+    // label numbers are equal
+    if (lhs.type < rhs.type) {
+        return -1;
+    } else if (lhs.type > rhs.type) {
+        return 1;
+    }
+
+    // both label number and type are equal
+    return 0;
+}
+
 
 /* Processing branch and label macros involves four steps:
  *
@@ -146,7 +167,7 @@ esp_err_t ulp_process_macros_and_load(uint32_t load_addr, const ulp_insn_t* prog
         ++read_ptr;
     }
     size_t real_program_size = *psize - macro_count;
-    const size_t ulp_mem_end = CONFIG_ULP_COPROC_RESERVE_MEM / sizeof(ulp_insn_t);
+    const size_t ulp_mem_end = CONFIG_ESP32_ULP_COPROC_RESERVE_MEM / sizeof(ulp_insn_t);
     if (load_addr > ulp_mem_end) {
         ESP_LOGW(TAG, "invalid load address %x, max is %x",
                 load_addr, ulp_mem_end);
@@ -203,24 +224,6 @@ esp_err_t ulp_process_macros_and_load(uint32_t load_addr, const ulp_insn_t* prog
     }
 
     // step 3: sort relocations array
-    int reloc_sort_func(const void* p_lhs, const void* p_rhs) {
-        const reloc_info_t lhs = *(const reloc_info_t*) p_lhs;
-        const reloc_info_t rhs = *(const reloc_info_t*) p_rhs;
-        if (lhs.label < rhs.label) {
-            return -1;
-        } else if (lhs.label > rhs.label) {
-            return 1;
-        }
-        // label numbers are equal
-        if (lhs.type < rhs.type) {
-            return -1;
-        } else if (lhs.type > rhs.type) {
-            return 1;
-        }
-
-        // both label number and type are equal
-        return 0;
-    }
     qsort(reloc_info, macro_count, sizeof(reloc_info_t),
             reloc_sort_func);
 

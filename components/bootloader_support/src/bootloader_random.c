@@ -14,30 +14,32 @@
 #include "bootloader_random.h"
 #include "soc/cpu.h"
 #include "soc/wdev_reg.h"
-#include "soc/rtc_cntl_reg.h"
-#include "soc/sens_reg.h"
-#include "soc/syscon_reg.h"
+#include "soc/rtc_periph.h"
+#include "soc/sens_periph.h"
+#include "soc/syscon_periph.h"
 #include "soc/dport_reg.h"
-#include "soc/i2s_reg.h"
+#include "soc/i2s_periph.h"
 #include "esp_log.h"
 
 #ifndef BOOTLOADER_BUILD
 #include "esp_system.h"
-#endif
 
-const char *TAG = "boot_rng";
+void bootloader_fill_random(void *buffer, size_t length)
+{
+    return esp_fill_random(buffer, length);
+}
 
+#else
 void bootloader_fill_random(void *buffer, size_t length)
 {
     uint8_t *buffer_bytes = (uint8_t *)buffer;
     uint32_t random;
-#ifdef BOOTLOADER_BUILD
     uint32_t start, now;
-#endif
+
+    assert(buffer != NULL);
 
     for (int i = 0; i < length; i++) {
         if (i == 0 || i % 4 == 0) { /* redundant check is for a compiler warning */
-#ifdef BOOTLOADER_BUILD
             /* in bootloader with ADC feeding HWRNG, we accumulate 1
                bit of entropy per 40 APB cycles (==80 CPU cycles.)
 
@@ -51,14 +53,12 @@ void bootloader_fill_random(void *buffer, size_t length)
                 random ^= REG_READ(WDEV_RND_REG);
                 RSR(CCOUNT, now);
             } while(now - start < 80*32*2); /* extra factor of 2 is precautionary */
-#else
-            random = esp_random();
-#endif
         }
 
         buffer_bytes[i] = random >> ((i % 4) * 8);
     }
 }
+#endif // BOOTLOADER_BUILD
 
 void bootloader_random_enable(void)
 {

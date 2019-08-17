@@ -21,7 +21,7 @@ static uint32_t end;
 
 static spi_flash_mmap_handle_t handle1, handle2, handle3;
 
-static void setup_mmap_tests()
+static void setup_mmap_tests(void)
 {
     if (start == 0) {
         const esp_partition_t *part = get_test_data_partition();
@@ -68,7 +68,6 @@ static void setup_mmap_tests()
             }
             /* Only rewrite the sector if it has changed */
             if (sector_needs_write) {
-                printf("setup_mmap_tests(): Prepping sector %d\n", abs_sector);
                 ESP_ERROR_CHECK( spi_flash_erase_sector((uint16_t) abs_sector) );
                 ESP_ERROR_CHECK( spi_flash_write(sector_offs, (const uint8_t *) buffer, sizeof(buffer)) );
             }
@@ -201,7 +200,7 @@ TEST_CASE("Can mmap unordered pages into contiguous memory", "[spi_flash]")
         pages[i]=startpage+(nopages-1)-i;
         printf("Offset %x page %d\n", i*0x10000, pages[i]);
     }
-    
+
     printf("Attempting mapping of unordered pages to contiguous memory area\n");
 
     spi_flash_mmap_handle_t handle1;
@@ -274,6 +273,55 @@ TEST_CASE("flash_mmap invalidates just-written data", "[spi_flash]")
 
     spi_flash_munmap(handle1);
     handle1 = 0;
+}
+
+TEST_CASE("flash_mmap can mmap after get enough free MMU pages", "[spi_flash]")
+{
+    //this test case should make flash size >= 4MB, because max size of Dcache can mapped is 4MB
+    setup_mmap_tests();
+
+    printf("Mapping %x (+%x)\n", start, end - start);
+    const void *ptr1;
+    ESP_ERROR_CHECK( spi_flash_mmap(start, end - start, SPI_FLASH_MMAP_DATA, &ptr1, &handle1) );
+    printf("mmap_res: handle=%d ptr=%p\n", handle1, ptr1);
+
+    spi_flash_mmap_dump();
+
+    srand(0);
+    const uint32_t *data = (const uint32_t *) ptr1;
+    for (int block = 0; block < (end - start) / 0x10000; ++block) {
+        printf("block %d\n", block);
+        for (int sector = 0; sector < 16; ++sector) {
+            printf("sector %d\n", sector);
+            for (uint32_t word = 0; word < 1024; ++word) {
+                TEST_ASSERT_EQUAL_HEX32(rand(), data[(block * 16 + sector) * 1024 + word]);
+            }
+        }
+    }
+    uint32_t free_pages = spi_flash_mmap_get_free_pages(SPI_FLASH_MMAP_DATA);
+    if (spi_flash_get_chip_size() <= 0x200000) {
+        free_pages -= 0x200000/0x10000;
+    }
+
+    printf("Mapping %x (+%x)\n", 0, free_pages * SPI_FLASH_MMU_PAGE_SIZE);
+    const void *ptr2;
+    ESP_ERROR_CHECK( spi_flash_mmap(0, free_pages * SPI_FLASH_MMU_PAGE_SIZE, SPI_FLASH_MMAP_DATA, &ptr2, &handle2) );
+    printf("mmap_res: handle=%d ptr=%p\n", handle2, ptr2);
+
+    spi_flash_mmap_dump();
+
+
+    printf("Unmapping handle1\n");
+    spi_flash_munmap(handle1);
+    handle1 = 0;
+    spi_flash_mmap_dump();
+
+    printf("Unmapping handle2\n");
+    spi_flash_munmap(handle2);
+    handle2 = 0;
+    spi_flash_mmap_dump();
+
+    TEST_ASSERT_EQUAL_PTR(NULL, spi_flash_phys2cache(start, SPI_FLASH_MMAP_DATA));
 }
 
 TEST_CASE("phys2cache/cache2phys basic checks", "[spi_flash]")
@@ -353,3 +401,24 @@ TEST_CASE("munmap followed by mmap flushes cache", "[spi_flash]")
     TEST_ASSERT_NOT_EQUAL(0, memcmp(buf, data, sizeof(buf)));
 }
 
+TEST_CASE("no stale data read post mmap and write partition", "[spi_flash]")
+{
+    const char buf[] = "Test buffer data for partition";
+    char read_data[sizeof(buf)];
+    setup_mmap_tests();
+
+    const esp_partition_t *p = get_test_data_partition();
+
+    const uint32_t* data;
+    spi_flash_mmap_handle_t handle;
+    TEST_ESP_OK(esp_partition_mmap(p, 0, SPI_FLASH_MMU_PAGE_SIZE,
+            SPI_FLASH_MMAP_DATA, (const void **) &data, &handle) );
+    memcpy(read_data, data, sizeof(read_data));
+    TEST_ESP_OK(esp_partition_erase_range(p, 0, SPI_FLASH_MMU_PAGE_SIZE));
+    TEST_ESP_OK(esp_partition_write(p, 0, buf, sizeof(buf)));
+    /* This should retrigger actual flash content read */
+    memcpy(read_data, data, sizeof(read_data));
+
+    spi_flash_munmap(handle);
+    TEST_ASSERT_EQUAL(0, memcmp(buf, read_data, sizeof(buf)));
+}

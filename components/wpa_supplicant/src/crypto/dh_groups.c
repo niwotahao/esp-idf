@@ -12,19 +12,15 @@
  * See README and COPYING for more details.
  */
 
-#include "crypto/includes.h"
+#include "utils/includes.h"
 
-#include "crypto/common.h"
+#include "utils/common.h"
 #include "crypto/crypto.h"
 #include "crypto/random.h"
 #include "crypto/dh_groups.h"
-#include "wpa/wpabuf.h"
-#include "wpa/wpa_debug.h"
-
-extern int crypto_mod_exp(const u8 *base, size_t base_len,
-		   const u8 *power, size_t power_len,
-		   const u8 *modulus, size_t modulus_len,
-		   u8 *result, size_t *result_len);
+#include "utils/wpabuf.h"
+#include "utils/wpa_debug.h"
+#include "esp_wifi_crypto_types.h"
 
 #ifdef ALL_DH_GROUPS
 
@@ -589,10 +585,11 @@ dh_init(const struct dh_group *dh, struct wpabuf **priv)
 	pv = wpabuf_alloc(pv_len);
 	if (pv == NULL)
 		return NULL;
+
 	if (crypto_mod_exp(dh->generator, dh->generator_len,
-			   wpabuf_head(*priv), wpabuf_len(*priv),
-			   dh->prime, dh->prime_len, wpabuf_mhead(pv),
-			   &pv_len) < 0) {
+						wpabuf_head(*priv), wpabuf_len(*priv),
+						dh->prime, dh->prime_len, wpabuf_mhead(pv),
+						&pv_len)) {
 		wpabuf_free(pv);
 		wpa_printf(MSG_INFO, "DH: crypto_mod_exp failed");
 		return NULL;
@@ -626,14 +623,16 @@ dh_derive_shared(const struct wpabuf *peer_public,
 	shared = wpabuf_alloc(shared_len);
 	if (shared == NULL)
 		return NULL;
+
 	if (crypto_mod_exp(wpabuf_head(peer_public), wpabuf_len(peer_public),
-			   wpabuf_head(own_private), wpabuf_len(own_private),
-			   dh->prime, dh->prime_len,
-			   wpabuf_mhead(shared), &shared_len) < 0) {
+						wpabuf_head(own_private), wpabuf_len(own_private),
+						dh->prime, dh->prime_len,
+						wpabuf_mhead(shared), &shared_len)) {
 		wpabuf_free(shared);
 		wpa_printf(MSG_INFO, "DH: crypto_mod_exp failed");
 		return NULL;
 	}
+
 	wpabuf_put(shared, shared_len);
 	wpa_hexdump_buf_key(MSG_DEBUG, "DH: shared key", shared);
 

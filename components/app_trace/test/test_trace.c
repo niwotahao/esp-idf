@@ -67,7 +67,7 @@ static void esp_apptrace_test_timer_init(int timer_group, int timer_idx, uint32_
     config.alarm_en = 1;
     config.auto_reload = 1;
     config.counter_dir = TIMER_COUNT_UP;
-    config.divider = 1;
+    config.divider = 2;     //Range is 2 to 65536
     config.intr_type = TIMER_INTR_LEVEL;
     config.counter_en = TIMER_PAUSE;
     /*Configure timer*/
@@ -86,8 +86,6 @@ static void esp_apptrace_test_timer_init(int timer_group, int timer_idx, uint32_
 #define ESP_APPTRACE_TEST_WRITE(_b_, _s_)            esp_apptrace_write(ESP_APPTRACE_DEST_TRAX, _b_, _s_, ESP_APPTRACE_TMO_INFINITE)
 #define ESP_APPTRACE_TEST_WRITE_FROM_ISR(_b_, _s_)   esp_apptrace_write(ESP_APPTRACE_DEST_TRAX, _b_, _s_, 0UL)
 #define ESP_APPTRACE_TEST_WRITE_NOWAIT(_b_, _s_)     esp_apptrace_write(ESP_APPTRACE_DEST_TRAX, _b_, _s_, 0)
-
-#define ESP_APPTRACE_TEST_CPUTICKS2US(_t_)       ((_t_)/(XT_CLOCK_FREQ/1000000))
 
 typedef struct {
     uint8_t *buf;
@@ -127,7 +125,7 @@ typedef struct {
 static SemaphoreHandle_t s_print_lock;
 #endif
 
-static uint64_t esp_apptrace_test_ts_get();
+static uint64_t esp_apptrace_test_ts_get(void);
 
 static void esp_apptrace_test_timer_isr(void *arg)
 {
@@ -385,7 +383,7 @@ static void esp_apptrace_test_task_crash(void *p)
 
 static int s_ts_timer_group, s_ts_timer_idx;
 
-static uint64_t esp_apptrace_test_ts_get()
+static uint64_t esp_apptrace_test_ts_get(void)
 {
     uint64_t ts = 0;
     timer_get_counter_value(s_ts_timer_group, s_ts_timer_idx, &ts);
@@ -405,7 +403,7 @@ static void esp_apptrace_test_ts_init(int timer_group, int timer_idx)
     config.alarm_en = 0;
     config.auto_reload = 0;
     config.counter_dir = TIMER_COUNT_UP;
-    config.divider = 1;
+    config.divider = 2;     //Range is 2 to 65536
     config.counter_en = 0;
     /*Configure timer*/
     timer_init(timer_group, timer_idx, &config);
@@ -415,14 +413,14 @@ static void esp_apptrace_test_ts_init(int timer_group, int timer_idx)
     timer_start(timer_group, timer_idx);
 }
 
-static void esp_apptrace_test_ts_cleanup()
+static void esp_apptrace_test_ts_cleanup(void)
 {
     timer_config_t config;
 
     config.alarm_en = 0;
     config.auto_reload = 0;
     config.counter_dir = TIMER_COUNT_UP;
-    config.divider = 1;
+    config.divider = 2;     //Range is 2 to 65536
     config.counter_en = 0;
     /*Configure timer*/
     timer_init(s_ts_timer_group, s_ts_timer_idx, &config);

@@ -26,13 +26,12 @@
 #include "esp_event.h"
 #include "esp_event_loop.h"
 #include "nvs_flash.h"
-#include "soc/rtc_cntl_reg.h"
-#include "rom/cache.h"
+#include "soc/rtc_periph.h"
+#include "esp32/rom/cache.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_spi_flash.h"
 
-#include "soc/gpio_reg.h"
 #include "driver/gpio.h"
 #include "esp_intr_alloc.h"
 
@@ -82,7 +81,7 @@ static void IRAM_ATTR gpio_handshake_isr_handler(void* arg)
 }
 
 //Main application
-void app_main()
+void app_main(void)
 {
     esp_err_t ret;
     spi_device_handle_t handle;
@@ -118,8 +117,8 @@ void app_main()
     };
 
     int n=0;
-    char sendbuf[128]="";
-    char recvbuf[128]="";
+    char sendbuf[128] = {0};
+    char recvbuf[128] = {0};
     spi_transaction_t t;
     memset(&t, 0, sizeof(t));
 
@@ -143,12 +142,16 @@ void app_main()
     xSemaphoreGive(rdySem);
 
     while(1) {
-        snprintf(sendbuf, 128, "Sender, transmission no. %04i. Last time, I received: \"%s\"", n, recvbuf);
-        t.length=128*8; //128 bytes
+        int res = snprintf(sendbuf, sizeof(sendbuf),
+                "Sender, transmission no. %04i. Last time, I received: \"%s\"", n, recvbuf);
+        if (res >= sizeof(sendbuf)) {
+            printf("Data truncated\n");
+        }
+        t.length=sizeof(sendbuf)*8;
         t.tx_buffer=sendbuf;
         t.rx_buffer=recvbuf;
         //Wait for slave to be ready for next byte before sending
-        xSemaphoreTake(rdySem, 100);//portMAX_DELAY); //Wait until slave is ready
+        xSemaphoreTake(rdySem, portMAX_DELAY); //Wait until slave is ready
         ret=spi_device_transmit(handle, &t);
         printf("Received: %s\n", recvbuf);
         n++;

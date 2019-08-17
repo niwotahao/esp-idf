@@ -15,29 +15,23 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 
 #include "esp_log.h"
 #include "esp_wifi.h"
-#include "esp_event_loop.h"
-
+#include "esp_event.h"
+#include "tcpip_adapter.h"
 #include "nvs_flash.h"
+#include "protocol_examples_common.h"
 
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 
-static EventGroupHandle_t wifi_event_group;
-
-/* The event group allows multiple bits for each event,
-   but we only care about one event - are we connected
-   to the AP with an IP? */
-const static int CONNECTED_BIT = BIT0;
 
 const static char *TAG = "Openssl_example";
 
 #define OPENSSL_EXAMPLE_SERVER_ACK "HTTP/1.1 200 OK\r\n" \
                                 "Content-Type: text/html\r\n" \
-                                "Content-Length: 98\r\n\r\n" \
+                                "Content-Length: 106\r\n\r\n" \
                                 "<html>\r\n" \
                                 "<head>\r\n" \
                                 "<title>OpenSSL example</title></head><body>\r\n" \
@@ -53,7 +47,7 @@ static void openssl_example_task(void *p)
     SSL_CTX *ctx;
     SSL *ssl;
 
-    int socket, new_socket;
+    int sockfd, new_sockfd;
     socklen_t addr_len;
     struct sockaddr_in sock_addr;
 
@@ -99,8 +93,8 @@ static void openssl_example_task(void *p)
     ESP_LOGI(TAG, "OK");
 
     ESP_LOGI(TAG, "SSL server create socket ......");
-    socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (socket < 0) {
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
         ESP_LOGI(TAG, "failed");
         goto failed2;
     }
@@ -111,7 +105,7 @@ static void openssl_example_task(void *p)
     sock_addr.sin_family = AF_INET;
     sock_addr.sin_addr.s_addr = 0;
     sock_addr.sin_port = htons(OPENSSL_EXAMPLE_LOCAL_TCP_PORT);
-    ret = bind(socket, (struct sockaddr*)&sock_addr, sizeof(sock_addr));
+    ret = bind(sockfd, (struct sockaddr*)&sock_addr, sizeof(sock_addr));
     if (ret) {
         ESP_LOGI(TAG, "failed");
         goto failed3;
@@ -119,7 +113,7 @@ static void openssl_example_task(void *p)
     ESP_LOGI(TAG, "OK");
 
     ESP_LOGI(TAG, "SSL server socket listen ......");
-    ret = listen(socket, 32);
+    ret = listen(sockfd, 32);
     if (ret) {
         ESP_LOGI(TAG, "failed");
         goto failed3;
@@ -136,14 +130,14 @@ reconnect:
     ESP_LOGI(TAG, "OK");
 
     ESP_LOGI(TAG, "SSL server socket accept client ......");
-    new_socket = accept(socket, (struct sockaddr *)&sock_addr, &addr_len);
-    if (new_socket < 0) {
+    new_sockfd = accept(sockfd, (struct sockaddr *)&sock_addr, &addr_len);
+    if (new_sockfd < 0) {
         ESP_LOGI(TAG, "failed" );
         goto failed4;
     }
     ESP_LOGI(TAG, "OK");
 
-    SSL_set_fd(ssl, new_socket);
+    SSL_set_fd(ssl, new_sockfd);
 
     ESP_LOGI(TAG, "SSL server accept client ......");
     ret = SSL_accept(ssl);
@@ -163,13 +157,13 @@ reconnect:
         ESP_LOGI(TAG, "SSL read: %s", recv_buf);
         if (strstr(recv_buf, "GET ") &&
             strstr(recv_buf, " HTTP/1.1")) {
-            ESP_LOGI(TAG, "SSL get matched message")
-            ESP_LOGI(TAG, "SSL write message")
+            ESP_LOGI(TAG, "SSL get matched message");
+            ESP_LOGI(TAG, "SSL write message");
             ret = SSL_write(ssl, send_data, send_bytes);
             if (ret > 0) {
-                ESP_LOGI(TAG, "OK")
+                ESP_LOGI(TAG, "OK");
             } else {
-                ESP_LOGI(TAG, "error")
+                ESP_LOGI(TAG, "error");
             }
             break;
         }
@@ -177,15 +171,15 @@ reconnect:
     
     SSL_shutdown(ssl);
 failed5:
-    close(new_socket);
-    new_socket = -1;
+    close(new_sockfd);
+    new_sockfd = -1;
 failed4:
     SSL_free(ssl);
     ssl = NULL;
     goto reconnect;
 failed3:
-    close(socket);
-    socket = -1;
+    close(sockfd);
+    sockfd = -1;
 failed2:
     SSL_CTX_free(ctx);
     ctx = NULL;
@@ -194,7 +188,7 @@ failed1:
     return ;
 } 
 
-static void openssl_client_init(void)
+static void openssl_server_init(void)
 {
     int ret;
     xTaskHandle openssl_handle;
@@ -203,7 +197,7 @@ static void openssl_client_init(void)
                       OPENSSL_EXAMPLE_TASK_NAME,
                       OPENSSL_EXAMPLE_TASK_STACK_WORDS,
                       NULL,
-                      OPENSSL_EXAMPLE_TASK_PRORIOTY,
+                      OPENSSL_EXAMPLE_TASK_PRIORITY,
                       &openssl_handle); 
 
     if (ret != pdPASS)  {
@@ -211,50 +205,17 @@ static void openssl_client_init(void)
     }
 }
 
-static esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
-{
-    switch(event->event_id) {
-    case SYSTEM_EVENT_STA_START:
-        esp_wifi_connect();
-        break;
-    case SYSTEM_EVENT_STA_GOT_IP:
-        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-        openssl_client_init();
-        break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
-        /* This is a workaround as ESP32 WiFi libs don't currently
-           auto-reassociate. */
-        esp_wifi_connect(); 
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
-        break;
-    default:
-        break;
-    }
-    return ESP_OK;
-}
-
-static void wifi_conn_init(void)
-{
-    tcpip_adapter_init();
-    wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK( esp_event_loop_init(wifi_event_handler, NULL) );
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = EXAMPLE_WIFI_SSID,
-            .password = EXAMPLE_WIFI_PASS,
-        },
-    };
-    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
-    ESP_LOGI(TAG, "start the WIFI SSID:[%s] password:[%s]\n", EXAMPLE_WIFI_SSID, EXAMPLE_WIFI_PASS);
-    ESP_ERROR_CHECK( esp_wifi_start() );
-}
-
 void app_main(void)
 {
-    ESP_ERROR_CHECK( nvs_flash_init() );
-    wifi_conn_init();
+    ESP_ERROR_CHECK(nvs_flash_init());
+    tcpip_adapter_init();
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
+     * Read "Establishing Wi-Fi or Ethernet Connection" section in
+     * examples/protocols/README.md for more information about this function.
+     */
+    ESP_ERROR_CHECK(example_connect());
+
+    openssl_server_init();
 }

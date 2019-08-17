@@ -4,7 +4,7 @@
 
 #include <esp_types.h>
 #include <stdio.h>
-#include "rom/ets_sys.h"
+#include "esp32/rom/ets_sys.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -12,9 +12,9 @@
 #include "freertos/queue.h"
 #include "freertos/xtensa_api.h"
 #include "unity.h"
-#include "soc/uart_reg.h"
+#include "soc/uart_periph.h"
 #include "soc/dport_reg.h"
-#include "soc/io_mux_reg.h"
+#include "driver/gpio.h"
 
 
 void ets_isr_unmask(uint32_t unmask);
@@ -164,7 +164,7 @@ static void uartRxInit(xQueueHandle q)
 {
     uint32_t reg_val;
 
-    PIN_PULLUP_DIS(PERIPHS_IO_MUX_U0TXD_U);
+    gpio_pullup_dis(1);
     PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0RXD_U, FUNC_U0RXD_U0RXD);
     PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0TXD_U, FUNC_U0TXD_U0TXD);
 

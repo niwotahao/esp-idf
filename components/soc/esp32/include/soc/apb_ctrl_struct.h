@@ -13,7 +13,14 @@
 // limitations under the License.
 #ifndef _SOC_APB_CTRL_STRUCT_H_
 #define _SOC_APB_CTRL_STRUCT_H_
-typedef struct {
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct apb_ctrl_dev_s {
     union {
         struct {
             volatile uint32_t pre_div:       10;
@@ -116,5 +123,10 @@ typedef struct {
     volatile uint32_t reserved_78;
     volatile uint32_t date;                                      /**/
 } apb_ctrl_dev_t;
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* _SOC_APB_CTRL_STRUCT_H_ */
